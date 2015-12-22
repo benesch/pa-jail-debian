@@ -1,0 +1,18 @@
+Source: pa-jail
+Section: utils
+Priority: optional
+Maintainer: Nikhil Benesch <nikhil.benesch@gmail.com>
+Build-Depends: debhelper (>= 9)
+Standards-Version: 3.9.6
+Homepage: https://github.com/kohler/peteramati
+Vcs-Git: git://github.com/benesch/pa-jail-debian.git
+Vcs-Browser: https://github.com/benesch/pa-jail-debian
+
+Package: pa-jail
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Simple process jail for untrusted code
+ Peteramati is a Web system for collecting, evaluating, and grading
+ student programming assignments. Peteramati's jail, pa-jail, runs
+ student assignment code in Linux containers, segregated from the main
+ machine.

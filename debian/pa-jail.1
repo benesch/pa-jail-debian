@@ -1,0 +1,18 @@
+.TH PA-JAIL "1" "December 22, 2015" "pa-jail 0.9" "User Commands"
+.SH NAME
+pa-jail \- a process jail for untrusted code
+.SH SYNOPSIS
+.B pa-jail add
+[\fB\-nh\fR] [\fB-f\fR \fIFILES\fR | \fB-F\fR \fIDATA\fR] [\fB-S\fR \fISKELETON\fR] \fIJAILDIR\fR [\fIUSER\fR]
+.br
+.B pa-jail run
+[\fB\-\-fg\fR] [\fB\-nqh\fR] [\fB\-T\fR \fITIMEOUT\fR] [\fB\-p\fR \fIPIDFILE\fR] [\fB\-i\fR \fIINPUT\fR]
+.RS 12
+[\fB\-f\fR \fIFILES\fR | \fB\-F\fR \fIDATA\fR] [\fB\-S\fR \fISKELETON\fR] \fIJAILDIR\fR \fIUSER\fR \fICOMMAND\fR
+.RE
+.br
+.B pa-jail mv
+\fISOURCE\fR \fIDEST\fR
+.br
+.B pa-jail rm
+[\fB\-nf\fR] \fIJAILDIR\fR

@@ -1,0 +1,5 @@
+pa-jail (0.9-1+trusty1) trusty; urgency=low
+
+  * Initial release
+
+ -- Nikhil Benesch <nikhil.benesch@gmail.com>  Tue, 22 Dec 2015 11:57:25 -0800
