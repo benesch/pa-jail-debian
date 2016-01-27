@@ -1,0 +1,9 @@
+PA-JAIL-DEBIAN
+
+Debian packaging for Peteramati's jail. Find upstream at:
+
+    https://github.com/kohler/peteramati
+
+Ubuntu PPA available at:
+
+    https://launchpad.net/~nikhil-benesch/+archive/ubuntu/pa-jail
