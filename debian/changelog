@@ -1,3 +1,9 @@
+pa-jail (0.9-1+wily1) wily; urgency=medium
+
+  * Import for Wily Werewolf
+
+ -- Nikhil Benesch <nikhil.benesch@gmail.com>  Wed, 27 Jan 2016 08:26:31 -0800
+
 pa-jail (0.9-1+trusty1) trusty; urgency=low
 
   * Initial release
