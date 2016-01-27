@@ -1,3 +1,9 @@
+pa-jail (0.9-1+vivid1) vivid; urgency=medium
+
+  * Import for Vivid Vervet
+
+ -- Nikhil Benesch <nikhil.benesch@gmail.com>  Wed, 27 Jan 2016 08:10:35 -0800
+
 pa-jail (0.9-1+trusty1) trusty; urgency=low
 
   * Initial release
