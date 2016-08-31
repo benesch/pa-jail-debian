@@ -396,6 +396,7 @@ struct mountslot {
     mountslot() : opts(0), wanted(false) {}
     mountslot(const char* fsname, const char* type, const char* mountopts);
     std::string debug_mountopts_args(unsigned long opts) const;
+    std::string debug_mount_command(std::string dst, unsigned long opts) const;
     void add_mountopt(const char* mopt);
     const char* mount_data() const;
     bool mountable(std::string src, std::string dst) const;
@@ -436,6 +437,10 @@ std::string mountslot::debug_mountopts_args(unsigned long opts) const {
     if (!arg.empty())
         return " -o " + arg;
     return arg;
+}
+
+std::string mountslot::debug_mount_command(std::string dst, unsigned long opts) const {
+    return "mount -i -n -t " + type + debug_mountopts_args(opts) + " " + fsname + " " + dst;
 }
 
 void mountslot::add_mountopt(const char* inopt) {
@@ -492,11 +497,8 @@ bool mountslot::mountable(std::string src, std::string dst) const {
 }
 
 int mountslot::x_mount(std::string dst, unsigned long opts) {
-    if (verbose) {
-        std::string optstr = debug_mountopts_args(opts);
-        fprintf(verbosefile, "mount -i -n -t %s%s %s %s\n",
-                type.c_str(), optstr.c_str(), fsname.c_str(), dst.c_str());
-    }
+    if (verbose)
+        fprintf(verbosefile, "%s\n", debug_mount_command(dst, opts).c_str());
     if (dryrun)
         return 0;
     return mount(fsname.c_str(), dst.c_str(), type.c_str(), opts, mount_data());
@@ -588,7 +590,7 @@ static int handle_mount(std::string src, std::string dst, bool in_child) {
         r = msx.x_mount(dst, msx.opts | MS_REMOUNT);
 #endif
     if (r != 0)
-        return perror_fail("mount %s: %s\n", dst.c_str());
+        return perror_fail("%s: %s\n", msx.debug_mount_command(dst, msx.opts).c_str());
     return 0;
 }
 
@@ -1761,15 +1763,21 @@ void jailownerinfo::buffer::transfer_in(int from) {
             rerrno = errno;
         }
     }
-
-    if (input_closed && transfer_eof && tail != sizeof(buf)) {
-        buf[tail] = VEOF;
-        ++tail;
-        transfer_eof = false;
-    }
 }
 
 void jailownerinfo::buffer::transfer_out(int to) {
+    if (input_closed && transfer_eof && head == tail) {
+        // send EOF character in canonical mode
+        struct termios tty;
+        if (tcgetattr(to, &tty) >= 0) {
+            tty.c_lflag |= ICANON;
+            (void) tcsetattr(to, TCSADRAIN, &tty);
+            buf[tail] = VEOF;
+            ++tail;
+            transfer_eof = false;
+        }
+    }
+
     if (to >= 0 && !output_closed && head != tail) {
         ssize_t nw = write(to, &buf[head], tail - head);
         if (nw != 0 && nw != -1)
@@ -1869,12 +1877,15 @@ void jailownerinfo::wait_background(pid_t child, int ptymaster) {
     }
 
     if (tcgetattr(ptymaster, &tty) >= 0) {
-        // blocking reads please (well, block for up to 0.5sec)
-        // the 0.5sec wait means we avoid long race conditions
+        // blocking reads please (well, block for up to 0.1sec)
+        // the 0.1sec wait means we avoid long race conditions
         tty.c_cc[VMIN] = 1;
-        tty.c_cc[VTIME] = 5;
-        // disable echo so we don't read our own input
+        tty.c_cc[VTIME] = 1;
+        // No echoing (don't read own input)
         tty.c_lflag &= ~ECHO;
+        // If stdin isn't a terminal, turn off canonical mode
+        if (!has_stdin_termios)
+            tty.c_lflag &= ~ICANON;
         tcsetattr(ptymaster, TCSANOW, &tty);
     }
     make_nonblocking(ptymaster);
