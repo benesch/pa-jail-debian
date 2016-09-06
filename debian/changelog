@@ -1,3 +1,32 @@
+pa-jail (0.9.3-1+xenial1) xenial; urgency=medium
+
+  [ Eddie Kohler ]
+  * Copy stdin's terminal setup to ptymaster.
+
+  [ Nikhil Benesch ]
+  * pa-jail: prevent truncated output
+  * pa-jail: fix sanitized relative paths
+
+  [ Eddie Kohler ]
+  * Include /dev/tty in the jail; make pty the controlling terminal.
+  * Use poll() instead of select().
+  * Use signalfd.
+  * Pass TERM environment variable along.
+  * Pass stdin, stdout, stderr along to the child if not tty.
+  * Jailed program declares self foreground process group.
+  * A fix for when stdout is redirected.
+  * Set the tty to raw mode even if it's only on stderr.
+  * If -i is given, forward stdout and stderr over the pty.
+  * If forwarding to a file because of -i, turn off output processing.
+  * Improve help.
+  * Add LICENSE (GPLv2).
+  * Markderp
+
+  [ Nikhil Benesch ]
+  * Update copyright file for official LICENSE info
+
+ -- Nikhil Benesch <nikhil.benesch@gmail.com> Mon, 05 Sep 2016 21:00:31 -0700
+
 pa-jail (0.9.2-1+xenial1) xenial; urgency=medium
 
   [ Eddie Kohler ]
