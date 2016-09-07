@@ -1,6 +1,6 @@
 // pa-jail.cc -- Peteramati program sets up a jail for student code
 // Peteramati is Copyright (c) 2013-2015 Eddie Kohler and others
-// Distributed under an MIT-like license; see LICENSE
+// See LICENSE for open-source distribution terms
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -1866,7 +1866,7 @@ void jailownerinfo::block(int ptymaster) {
     if (timerisset(&expiry)) {
         struct timeval now;
         gettimeofday(&now, 0);
-        if (timercmp(&now, &expiry, >)) {
+        if (timercmp(&now, &expiry, <)) {
             timersub(&expiry, &now, &now);
             timeout_ms = now.tv_sec * 1000 + now.tv_usec / 1000;
         } else
