@@ -68,10 +68,13 @@ static bool verbose = false;
 static bool dryrun = false;
 static bool quiet = false;
 static bool doforce = false;
+static bool no_onlcr = false;
 static FILE* verbosefile = stdout;
+static int timingfd = -1;
 static std::string linkdir;
 static std::string dstroot;
 static std::string pidfilename;
+static std::string timingfilename;
 static int pidfd = -1;
 static volatile sig_atomic_t got_sigterm = 0;
 #if __linux__
@@ -318,9 +321,25 @@ static bool x_symlink_eexist_ok(const char* oldpath, const char* newpath) {
 static int x_symlink(const char* oldpath, const char* newpath) {
     if (verbose)
         fprintf(verbosefile, "ln -s %s %s\n", oldpath, newpath);
-    if (!dryrun && symlink(oldpath, newpath) != 0
+    if (!dryrun
+        && symlink(oldpath, newpath) != 0
         && (errno != EEXIST || !x_symlink_eexist_ok(oldpath, newpath)))
         return perror_fail("symlink %s: %s\n", (std::string(oldpath) + " " + newpath).c_str());
+    return 0;
+}
+
+static int x_copy_utimes(const char* path, const struct stat& st) {
+#if __linux__
+    if (verbose)
+        fprintf(verbosefile, "touch -m -d @%ld %s\n", st.st_mtime, path);
+    if (!dryrun) {
+        struct timespec ts[2];
+        ts[0].tv_nsec = UTIME_OMIT;
+        ts[1] = st.st_mtim;
+        if (utimensat(-1, path, ts, AT_SYMLINK_NOFOLLOW) != 0)
+            return perror_fail("utimensat %s: %s\n", path);
+    }
+#endif
     return 0;
 }
 
@@ -654,16 +673,24 @@ static void handle_symlink_dst(std::string dst, std::string src,
         handle_copy(src, dst.substr(root.length()), 0, jaildev);
 }
 
-static int x_cp_p(const std::string& src, const std::string& dst) {
+static int x_rm_f(const std::string &dst) {
     if (verbose)
-        fprintf(verbosefile, "rm -f %s\ncp -p %s %s\n",
-                dst.c_str(), src.c_str(), dst.c_str());
+        fprintf(verbosefile, "rm -f %s\n", dst.c_str());
     if (dryrun)
         return 0;
-
     int r = unlink(dst.c_str());
     if (r == -1 && errno != ENOENT)
         return perror_fail("rm %s: %s\n", dst.c_str());
+    return 0;
+}
+
+static int x_cp_p(const std::string& src, const std::string& dst) {
+    if (x_rm_f(dst))
+        return 1;
+    if (verbose)
+        fprintf(verbosefile, "cp -p %s %s\n", src.c_str(), dst.c_str());
+    if (dryrun)
+        return 0;
 
     pid_t child = fork();
     if (child == 0) {
@@ -684,11 +711,16 @@ static int x_cp_p(const std::string& src, const std::string& dst) {
         return perror_fail("/bin/cp %s: Did not exit\n", dst.c_str());
 }
 
-#define DO_COPY_SKELETON 1
-#define DO_COPY_LINK 2
+static inline int stat_mtimes_same(const struct stat& st1, const struct stat& st2) {
+#if __linux__
+    return st1.st_mtim.tv_sec == st2.st_mtim.tv_sec && st1.st_mtim.tv_nsec == st2.st_mtim.tv_nsec;
+#else
+    return st1.st_mtime == st2.st_mtime;
+#endif
+}
 
 static int do_copy(const std::string& dst, const std::string& src,
-                   const struct stat& ss, int flags, dev_t jaildev) {
+                   const struct stat& ss, bool reuse_link, dev_t jaildev) {
     struct stat ds;
     int r = lstat(dst.c_str(), &ds);
     if (r == 0
@@ -699,8 +731,8 @@ static int do_copy(const std::string& dst, const std::string& src,
             || ss.st_size == ds.st_size)
         && ((!S_ISBLK(ss.st_mode) && !S_ISCHR(ss.st_mode))
             || ss.st_rdev == ds.st_rdev)
-        && (!S_ISREG(ss.st_mode)
-            || ss.st_mtime == ds.st_mtime)) {
+        && ((!S_ISREG(ss.st_mode) && !S_ISLNK(ss.st_mode))
+            || stat_mtimes_same(ss, ds))) {
         if (S_ISREG(ss.st_mode)) {
             auto di = std::make_pair(ss.st_dev, ss.st_ino);
             devino_table.insert(std::make_pair(di, dst));
@@ -710,7 +742,7 @@ static int do_copy(const std::string& dst, const std::string& src,
 
     // check for hard link to already-created file
     if (S_ISREG(ss.st_mode)) {
-        if (flags & DO_COPY_LINK) {
+        if (reuse_link) {
             auto di = std::make_pair(ss.st_dev, ss.st_ino);
             auto it = devino_table.find(di);
             if (it != devino_table.end())
@@ -726,16 +758,19 @@ static int do_copy(const std::string& dst, const std::string& src,
         }
         if (v_mkdir(dst.c_str(), perm) != 0)
             return 1;
-        return x_lchown(dst.c_str(), ss.st_uid, ss.st_gid);
     } else if (S_ISCHR(ss.st_mode) || S_ISBLK(ss.st_mode)) {
         // XXX special handling for /dev/ptmx; there is probably a
         // cleaner way
+        if (x_rm_f(dst))
+            return 1;
         if (src.length() == 9 && src == "/dev/ptmx")
             return x_symlink("pts/ptmx", dst.c_str());
         mode_t mode = ss.st_mode & (S_IFREG | S_IFCHR | S_IFBLK | S_IFIFO | S_IFSOCK | S_ISUID | S_ISGID | S_IRWXU | S_IRWXG | S_IRWXO);
         if (x_mknod(dst.c_str(), mode, ss.st_rdev))
             return 1;
     } else if (S_ISLNK(ss.st_mode)) {
+        if (x_rm_f(dst))
+            return 1;
         char lnkbuf[4096];
         ssize_t r = readlink(src.c_str(), lnkbuf, sizeof(lnkbuf));
         if (r == -1)
@@ -744,6 +779,8 @@ static int do_copy(const std::string& dst, const std::string& src,
             return perror_fail("%s: Symbolic link too long\n", src.c_str());
         lnkbuf[r] = 0;
         if (x_symlink(lnkbuf, dst.c_str()))
+            return 1;
+        if (x_copy_utimes(dst.c_str(), ss))
             return 1;
         handle_symlink_dst(dst, src, std::string(lnkbuf), jaildev);
     } else
@@ -796,9 +833,9 @@ static int handle_copy(std::string src, std::string subdst,
 
     // set up skeleton directory version
     if (!linkdir.empty())
-        do_copy(linkdir + subdst, src, ss, DO_COPY_SKELETON | DO_COPY_LINK, jaildev);
+        do_copy(linkdir + subdst, src, ss, true, jaildev);
 
-    if (do_copy(dst, src, ss, flags & FLAG_CP ? 0 : DO_COPY_LINK, jaildev))
+    if (do_copy(dst, src, ss, !(flags & FLAG_CP), jaildev))
         return 1;
 
     if (S_ISDIR(ss.st_mode))
@@ -1381,10 +1418,11 @@ class jailownerinfo {
     int exec_go();
 
   private:
-    const char* newenv[6];
+    std::vector<const char*> newenv;
     char** argv;
     jaildirinfo* jaildir;
     int inputfd;
+    struct timeval start_time;
     struct timeval expiry;
     struct buffer {
         char buf[8192];
@@ -1409,6 +1447,7 @@ class jailownerinfo {
     int ttyfd;
     struct termios ttyfd_termios;
     int child_status;
+    bool has_blocked;
 
     void start_sigpipe();
     void block(int ptymaster);
@@ -1512,19 +1551,36 @@ void jailownerinfo::exec(int argc, char** argv, jaildirinfo& jaildir,
             else if (strncmp(*eptr, "LD_LIBRARY_PATH=", 16) == 0)
                 ld_library_path = *eptr;
     }
-    int newenvpos = 0;
-    newenv[newenvpos++] = path;
-    newenv[newenvpos++] = lang;
+    newenv.push_back(path);
+    newenv.push_back(lang);
     if (term)
-        newenv[newenvpos++] = term;
+        newenv.push_back(term);
     if (ld_library_path)
-        newenv[newenvpos++] = ld_library_path;
-    newenv[newenvpos++] = homebuf;
-    newenv[newenvpos++] = NULL;
+        newenv.push_back(ld_library_path);
+    newenv.push_back(homebuf);
+    while (argc > 0) {
+        const char* arg = argv[0];
+        const char* argpos = arg;
+        while (*argpos && (isalnum((unsigned char) *argpos) || *argpos == '_'))
+            ++argpos;
+        if (arg == argpos || *argpos != '=')
+            break;
+        std::vector<const char*>::size_type i = 0;
+        while (i < newenv.size() && strncmp(newenv[i], arg, argpos - arg) != 0)
+            ++i;
+        if (i < newenv.size())
+            newenv[i] = arg;
+        else
+            newenv.push_back(arg);
+        --argc, ++argv;
+    }
+    newenv.push_back(NULL);
 
     // create command
+    if (!argc)
+        die("Nothing to run\n");
     delete[] this->argv;
-    this->argv = new char*[5 + argc - (optind + 2)];
+    this->argv = new char*[5 + argc];
     if (!this->argv)
         die("Out of memory\n");
     int newargvpos = 0;
@@ -1532,11 +1588,11 @@ void jailownerinfo::exec(int argc, char** argv, jaildirinfo& jaildir,
     this->argv[newargvpos++] = (char*) owner_sh.c_str();
     this->argv[newargvpos++] = (char*) "-l";
     this->argv[newargvpos++] = (char*) "-c";
-    if (optind + 3 == argc)
-        command = argv[optind + 2];
+    if (argc == 1)
+        command = argv[0];
     else {
-        command = shell_quote(argv[optind + 2]);
-        for (int i = optind + 3; i < argc; ++i)
+        command = shell_quote(argv[0]);
+        for (int i = 0; i < argc; ++i)
             command += std::string(" ") + shell_quote(argv[i]);
     }
     this->argv[newargvpos++] = const_cast<char*>(command.c_str());
@@ -1546,11 +1602,11 @@ void jailownerinfo::exec(int argc, char** argv, jaildirinfo& jaildir,
     this->jaildir = &jaildir;
     this->inputfd = inputfd;
     if (timeout > 0) {
-        struct timeval now, delta;
-        gettimeofday(&now, 0);
+        gettimeofday(&this->start_time, 0);
+        struct timeval delta;
         delta.tv_sec = (long) timeout;
         delta.tv_usec = (long) ((timeout - delta.tv_sec) * 1000000);
-        timeradd(&now, &delta, &this->expiry);
+        timeradd(&this->start_time, &delta, &this->expiry);
     } else
         timerclear(&this->expiry);
 
@@ -1693,6 +1749,11 @@ int jailownerinfo::exec_go() {
             int ptyslave = open(ptyslavename, O_RDWR);
             if (ptyslave == -1)
                 perror_die(ptyslavename);
+            close(ptymaster);
+#ifdef TIOCSCTTY
+            ioctl(ptyslave, TIOCSCTTY, 0);
+#endif
+            tcsetpgrp(ptyslave, child);
 #ifdef TIOCGWINSZ
             {
                 struct winsize ws;
@@ -1702,25 +1763,20 @@ int jailownerinfo::exec_go() {
                 ioctl(ptyslave, TIOCSWINSZ, &ws);
             }
 #endif
-#ifdef TIOCSCTTY
-            ioctl(ptyslave, TIOCSCTTY, 0);
-#endif
-            tcsetpgrp(ptyslave, child);
-
-            if (inputfd > 0 || stdin_tty)
-                dup2(ptyslave, STDIN_FILENO);
-            if (inputfd > 0 && !stdout_tty) {
+            if (no_onlcr) {
                 struct termios tty;
                 if (tcgetattr(ptyslave, &tty) >= 0) {
-                    tty.c_oflag = 0; // no NL->NLCR xlation, no other proc.
+                    tty.c_oflag &= ~ONLCR;
                     tcsetattr(ptyslave, TCSANOW, &tty);
                 }
             }
+
+            if (inputfd > 0 || stdin_tty)
+                dup2(ptyslave, STDIN_FILENO);
             if (inputfd > 0 || stdout_tty)
                 dup2(ptyslave, STDOUT_FILENO);
             if (inputfd > 0 || stderr_tty)
                 dup2(ptyslave, STDERR_FILENO);
-            close(ptymaster);
             close(ptyslave);
 
             // restore all signals to their default actions
@@ -1730,7 +1786,7 @@ int jailownerinfo::exec_go() {
                 signal(sig, SIG_DFL);
 
             if (execve(this->argv[0], (char* const*) this->argv,
-                       (char* const*) newenv) != 0) {
+                       (char* const*) newenv.data()) != 0) {
                 fprintf(stderr, "exec %s: %s\n", owner_sh.c_str(), strerror(errno));
                 exit(126);
             }
@@ -1873,7 +1929,10 @@ void jailownerinfo::block(int ptymaster) {
             timeout_ms = 0;
     }
 
-    poll(p, nfd, timeout_ms);
+    if (poll(p, nfd, 0) == 0) {
+        has_blocked = true;
+        poll(p, nfd, timeout_ms);
+    }
 
     if (p[0].revents & POLLIN) {
 #if __linux__
@@ -1932,9 +1991,8 @@ void jailownerinfo::wait_background(pid_t child, int ptymaster) {
     }
 
     // if input is a tty, put it in raw mode with short blocking
-    struct termios tty;
     if (ttyfd >= 0) {
-        tty = ttyfd_termios;
+        struct termios tty = ttyfd_termios;
         cfmakeraw(&tty);
         tty.c_cc[VMIN] = 1;
         tty.c_cc[VTIME] = 1;
@@ -1962,7 +2020,7 @@ void jailownerinfo::wait_background(pid_t child, int ptymaster) {
 
         // if child has not died, and read produced error, report it
         if (from_slave.input_closed && from_slave.rerrno != EIO) {
-            fprintf(stderr, "read: %s%s", strerror(from_slave.rerrno), stderr_tty ? "\r\n" : "\n");
+            fprintf(stderr, "read: %s%s", strerror(from_slave.rerrno), no_onlcr ? "\n" : "\r\n");
             exec_done(child, 125);
         }
 
@@ -1976,6 +2034,25 @@ void jailownerinfo::wait_background(pid_t child, int ptymaster) {
             exec_done(child, 128 + SIGTERM);
         to_slave.transfer_out(ptymaster);
         from_slave.transfer_in(ptymaster);
+        if (has_blocked && timingfd != -1) {
+            off_t out_offset = lseek(STDOUT_FILENO, 0, SEEK_CUR);
+            struct timeval now, delta;
+            gettimeofday(&now, 0);
+            timersub(&now, &this->start_time, &delta);
+            unsigned long long deltamsecs = (delta.tv_sec * 1000000 + delta.tv_usec) / 1000;
+
+            char timingstr[256];
+            int written = 0;
+            int len = snprintf(timingstr, sizeof(timingstr), "%llu,%llu\n", deltamsecs, (unsigned long long) out_offset);
+            assert(len < 256);
+            while (written < len) {
+                int r = write(timingfd, timingstr, len);
+                if (r < 0)
+                    perror_die("Timing file");
+                written += r;
+            }
+            has_blocked = false;
+        }
         from_slave.transfer_out(STDOUT_FILENO);
     }
 }
@@ -1987,7 +2064,7 @@ void jailownerinfo::exec_done(pid_t child, int exit_status) {
     if (exit_status == 128 + SIGTERM && !quiet)
         xmsg = "...terminated";
     if (xmsg) {
-        const char* nl = stderr_tty ? "\r\n" : "\n";
+        const char* nl = no_onlcr ? "\n" : "\r\n";
         fprintf(stderr, inputfd > 0 || stderr_tty ? "%s\x1b[3;7;31m%s\x1b[0m%s" : "%s%s%s", nl, xmsg, nl);
     }
 #if __linux__
@@ -2029,16 +2106,17 @@ JAILDIR must be allowed by /etc/pa-jail.conf.\n\
             fprintf(stderr, "Usage: pa-jail add [OPTIONS...] JAILDIR [USER]\n\
 Create or augment a jail. JAILDIR must be allowed by /etc/pa-jail.conf.\n\n");
         else
-            fprintf(stderr, "Usage: pa-jail run [OPTIONS...] JAILDIR USER COMMAND...\n\
+            fprintf(stderr, "Usage: pa-jail run [OPTIONS...] JAILDIR USER [NAME=VALUE...] COMMAND...\n\
 Run COMMAND as USER in the JAILDIR jail. JAILDIR must be allowed by\n\
 /etc/pa-jail.conf.\n\n");
         fprintf(stderr, "  -f, --contents-file FILE  populate jail with contents of FILE\n");
         fprintf(stderr, "  -F, --contents DATA       populate jail with DATA\n");
         fprintf(stderr, "  -h, --chown-home          change ownership of USER homedir\n");
-        fprintf(stderr, "  -S, --skeleton SKELDIR    use SKELDIR to populate jail\n");
+        fprintf(stderr, "  -S, --skeleton SKELDIR    populate jail from SKELDIR\n");
         if (action == do_run) {
             fprintf(stderr, "  -p, --pid-file PIDFILE    write jail process PID to PIDFILE\n\
   -i, --input INPUTSOCKET   use TTY, read input from INPUTSOCKET\n\
+      --no-onlcr            don't translate \\n -> \\r\\n in output\n\
   -T, --timeout TIMEOUT     kill the jail after TIMEOUT\n\
       --fg          run in the foreground\n");
         }
@@ -2055,6 +2133,8 @@ static struct option longoptions_before[] = {
     { NULL, 0, NULL, 0 }
 };
 
+#define ARG_ONLCR 1000
+#define ARG_NO_ONLCR 1001
 static struct option longoptions_run[] = {
     { "verbose", no_argument, NULL, 'V' },
     { "dry-run", no_argument, NULL, 'n' },
@@ -2068,6 +2148,9 @@ static struct option longoptions_run[] = {
     { "input", required_argument, NULL, 'i' },
     { "chown-home", no_argument, NULL, 'h' },
     { "chown-user", required_argument, NULL, 'u' },
+    { "onlcr", no_argument, NULL, ARG_ONLCR },
+    { "no-onlcr", no_argument, NULL, ARG_NO_ONLCR },
+    { "timing-file", required_argument, NULL, 't' },
     { NULL, 0, NULL, 0 }
 };
 
@@ -2083,7 +2166,7 @@ static struct option* longoptions_action[] = {
     longoptions_before, longoptions_run, longoptions_run, longoptions_rm, longoptions_before
 };
 static const char* shortoptions_action[] = {
-    "+Vn", "VnS:f:F:p:T:qi:hu:", "VnS:f:F:p:T:qi:hu:", "Vnf", "Vn"
+    "+Vn", "VnS:f:F:p:T:qi:hu:t:", "VnS:f:F:p:T:qi:hu:t:", "Vnf", "Vn"
 };
 
 int main(int argc, char** argv) {
@@ -2136,6 +2219,10 @@ int main(int argc, char** argv) {
                 pidfilename = optarg;
             else if (ch == 'i')
                 inputarg = optarg;
+            else if (ch == ARG_ONLCR)
+                no_onlcr = false;
+            else if (ch == ARG_NO_ONLCR)
+                no_onlcr = true;
             else if (ch == 'g')
                 foreground = true;
             else if (ch == 'h')
@@ -2149,6 +2236,8 @@ int main(int argc, char** argv) {
                 timeout = strtod(optarg, &end);
                 if (end == optarg || *end != 0)
                     usage();
+            } else if(ch == 't' && action == do_run) {
+                timingfilename = optarg;
             } else /* if (ch == 'H') */
                 usage(action);
         }
@@ -2213,6 +2302,14 @@ int main(int argc, char** argv) {
         if (pidfd == -1)
             perror_die(pidfilename);
         atexit(cleanup_pidfd);
+    }
+
+    // create timing file as current user
+    if (!timingfilename.empty()) {
+        timingfd = open(timingfilename.c_str(), O_WRONLY | O_CLOEXEC | O_CREAT | O_TRUNC, 0666);
+
+        if (timingfd < 0)
+            perror_die(timingfilename);
     }
 
     // escalate so that the real (not just effective) UID/GID is root. this is
@@ -2333,7 +2430,12 @@ int main(int argc, char** argv) {
 
     // maybe execute a command in the jail
     if (optind + 2 < argc)
-        jailuser.exec(argc, argv, jaildir, inputfd, timeout, foreground);
+        jailuser.exec(argc - (optind + 2), argv + optind + 2, jaildir, inputfd, timeout, foreground);
+
+    // close timing file if appropriate
+    if (timingfd != -1) {
+        close(timingfd);
+    }
 
     exit(0);
 }
