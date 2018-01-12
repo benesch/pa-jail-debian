@@ -1,3 +1,19 @@
+pa-jail (0.9.5-1+xenial1) xenial; urgency=medium
+
+  [ Eddie Kohler ]
+  * Remove destination device nodes and symlinks during copy.
+  * Clean up DO_COPY flags: this is easier to understand.
+  * Check and copy mtimes on symbolic links.
+  * pa-jail run: Accept "NAME=VALUE" environment variable settings.
+  * pa-trace: Add --raw argument.
+  * Translate \n -> \r\n on output as expected.
+  * Leave pty state as it is when initialized.
+
+  [ Michael Colavita ]
+  * Early replay functionality for xterm displays
+
+ -- Eddie Kohler <ekohler@gmail.com>  Thu, 11 Jan 2018 20:46:39 -0800
+
 pa-jail (0.9.4-1+xenial1) xenial; urgency=medium
 
   * Update some more license headers
